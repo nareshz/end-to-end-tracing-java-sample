@@ -1,12 +1,12 @@
 package org.example;
 
 // Imports the Google Cloud client library
-import com.google.api.Logging;
 import com.google.cloud.opentelemetry.trace.TraceConfiguration;
 import com.google.cloud.spanner.DatabaseClient;
 import com.google.cloud.spanner.DatabaseId;
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Spanner;
+import com.google.cloud.spanner.SpannerException;
 import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.opentelemetry.trace.TraceExporter;
 import com.google.cloud.trace.v2.stub.TraceServiceStubSettings;
@@ -20,6 +20,7 @@ import io.opentelemetry.exporter.logging.LoggingSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.SpanProcessor;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
@@ -46,6 +47,7 @@ public class Main {
         .setProjectId("span-cloud-testing")
         .setHost("https://staging-wrenchworks.sandbox.googleapis.com:443")
         .setOpenTelemetry(openTelemetrySdk)
+        .setEnableEndToEndTracing(true)
         .build();
     Spanner spanner = options.getService();
 
@@ -86,8 +88,11 @@ public class Main {
         .set("email")
         .to(String.format("ksensei-%d@google.com", System.currentTimeMillis()))
         .build());
-    dbClient.write(mutations);
-
+    try {
+      dbClient.write(mutations);
+    } catch (SpannerException e) {
+      System.out.println(e);
+    }
     s.close();
     span.end();
   }
@@ -103,15 +108,17 @@ public class Main {
                 .build().createStub())
             .setDeadline(Duration.ofMillis(30000)).build();
 
-    LoggingSpanExporter loggingSpanExporter = LoggingSpanExporter.create();
-    // SpanExporter traceExporter = TraceExporter.createWithConfiguration(configuration);
+    // For debugging use LoggingSpanExporter, prints span to stdout instead of exporting.
+    // LoggingSpanExporter loggingSpanExporter = LoggingSpanExporter.create();
+    SpanExporter traceExporter = TraceExporter.createWithConfiguration(configuration);
     // Register the TraceExporter with OpenTelemetry
     return OpenTelemetrySdk.builder()
         .setPropagators(ContextPropagators.create(TextMapPropagator.composite(W3CTraceContextPropagator.getInstance(),
             W3CBaggagePropagator.getInstance())))
         .setTracerProvider(
             SdkTracerProvider.builder()
-                .addSpanProcessor(SimpleSpanProcessor.create(loggingSpanExporter))
+                .addSpanProcessor(BatchSpanProcessor.builder(traceExporter).build())
+                // .addSpanProcessor(SimpleSpanProcessor.create(loggingSpanExporter))
                 .setSampler(Sampler.alwaysOn())
                 .build())
         .buildAndRegisterGlobal();
