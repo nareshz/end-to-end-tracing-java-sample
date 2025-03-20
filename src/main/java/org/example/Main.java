@@ -1,15 +1,21 @@
 package org.example;
 
+import com.google.api.gax.core.FixedCredentialsProvider;
 // Imports the Google Cloud client library
 import com.google.cloud.opentelemetry.trace.TraceConfiguration;
 import com.google.cloud.spanner.DatabaseClient;
 import com.google.cloud.spanner.DatabaseId;
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.ResultSet;
+import com.google.cloud.spanner.SessionPoolOptions;
 import com.google.cloud.spanner.Spanner;
 import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.Statement;
+import com.google.cloud.trace.v1.TraceServiceClient;
+import com.google.cloud.trace.v1.TraceServiceSettings;
 import com.google.cloud.opentelemetry.trace.TraceExporter;
+
+import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator;
 import io.opentelemetry.context.Scope;
@@ -21,6 +27,8 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import io.opentelemetry.sdk.trace.samplers.Sampler;
+import com.google.devtools.cloudtrace.v1.GetTraceRequest;
+import com.google.devtools.cloudtrace.v1.Trace;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -38,12 +46,12 @@ public class Main {
   private static OpenTelemetrySdk openTelemetrySdk;
 
   private static final String PROJECT_ID = "span-cloud-testing";
-  private static final String INSTANCE_ID = "nareshz-dev-test";
+  private static final String INSTANCE_ID = "nareshz-test";
   private static final String DATABASE_ID = "test-db";
 
-  private static final String CLOUD_TRACE_ENDPOINT = "staging-cloudtrace.sandbox.googleapis.com:443";
+  private static final String CLOUD_TRACE_ENDPOINT = "cloudtrace.googleapis.com:443";
   
-  private static final String CLOUD_SPANNER_ENDPOINT = "https://staging-wrenchworks.sandbox.googleapis.com:443";
+  private static final String CLOUD_SPANNER_ENDPOINT = "https://preprod-spanner.sandbox.googleapis.com:443";
 
   static class Player {
     String firstName;
@@ -62,12 +70,12 @@ public class Main {
  
   private static void createPlayer(DatabaseClient dbClient, Player player)
       throws InterruptedException {
-    Span span = openTelemetrySdk.getTracer(INSTRUMENTATION_SCOPE_NAME)
-        .spanBuilder("nareshz:create-player-java")
-        .startSpan();
-    Scope s = span.makeCurrent();
+    // Span span = openTelemetrySdk.getTracer(INSTRUMENTATION_SCOPE_NAME)
+    //     .spanBuilder("sampleapp:create-player-java")
+    //     .startSpan();
+    // Scope s = span.makeCurrent();
 
-    System.out.println(String.format("Trace_id for creating player with email %s: %s", player.email, span.getSpanContext().getTraceId()));
+    // System.out.println(String.format("Trace_id for creating player with email %s: %s", player.email, span.getSpanContext().getTraceId()));
     
     List<Mutation> mutations = new ArrayList<>();
     mutations.add(Mutation.newInsertBuilder("Players")
@@ -84,20 +92,20 @@ public class Main {
       dbClient.write(mutations);
     } finally {
     }
-    s.close();
-    span.end();
+    // s.close();
+    // span.end();
   }
 
   private static Player readPlayer(DatabaseClient dbClient, String playerEmail)
       throws InterruptedException {
     Span span = openTelemetrySdk.getTracer(INSTRUMENTATION_SCOPE_NAME)
-        .spanBuilder("nareshz:read-player-java")
+        .spanBuilder("sampleapp:read-player-java")
         .startSpan();
     Scope s = span.makeCurrent();
 
     System.out.println(String.format("Trace_id for reading player with email %s: %s", playerEmail, span.getSpanContext().getTraceId()));
      
-    String readQuery = String.format("SELECT * FROM Players WHERE email = \"%s\" LIMIT 1", playerEmail);
+    String readQuery = String.format("SELECT * FROM Players WHERE email = \'%s\' LIMIT 1", playerEmail);
     try (ResultSet rs =
         dbClient.singleUse().executeQuery(Statement.of(readQuery))) {
       rs.next();
@@ -116,7 +124,7 @@ public class Main {
     TraceConfiguration configuration =
       TraceConfiguration.builder()
         .setProjectId(PROJECT_ID)
-        .setTraceServiceEndpoint(CLOUD_TRACE_ENDPOINT)
+        // .setTraceServiceEndpoint(CLOUD_TRACE_ENDPOINT)
         .build();
 
     Resource resource = Resource
@@ -124,46 +132,73 @@ public class Main {
 
     // Register the TraceExporter with OpenTelemetry
     SpanExporter traceExporter = TraceExporter.createWithConfiguration(configuration);
+
+    BatchSpanProcessor otlpGrpcSpanProcessor = BatchSpanProcessor.builder(traceExporter).build();
+
     return OpenTelemetrySdk.builder()
         .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
         .setTracerProvider(
             SdkTracerProvider.builder()
+                .addSpanProcessor(otlpGrpcSpanProcessor)
                 .setResource(resource)
-                .addSpanProcessor(BatchSpanProcessor.builder(traceExporter).build())
                 .setSampler(Sampler.alwaysOn())
                 .build())
         .build();
   }
 
   public static void main(String... args) throws Exception {
-    // Enable tracing and metrics collection.
-    SpannerOptions.enableOpenTelemetryMetrics();
+    // SessionPoolOptions sessionPoolOptions =
+    //     SessionPoolOptionsHelper.useMultiplexedSessionsForRW(SessionPoolOptions.newBuilder()).build();
+
+    Resource resource = Resource.getDefault().merge(Resource.builder().put("service.name",
+        "spanner-benchmark").build());
+    SpanExporter traceExporter = TraceExporter.createWithConfiguration(
+        TraceConfiguration.builder().setProjectId(PROJECT_ID).build()
+    );
+
+    // Using a batch span processor
+    // You can use .setScheduleDelay(), .setExporterTimeout(),
+    // .setMaxQueueSize(), and .setMaxExportBatchSize() to further customize.
+    BatchSpanProcessor otlpGrpcSpanProcessor = BatchSpanProcessor.builder(traceExporter).build();
+
+    // Create a new tracer provider
+    SdkTracerProvider sdkTracerProvider = SdkTracerProvider.builder()
+        // Use Otlp exporter or any other exporter of your choice.
+        .addSpanProcessor(otlpGrpcSpanProcessor)
+        .setResource(resource)
+        .setSampler(Sampler.alwaysOn())
+        .build();
+
+    // Export to a collector that is expecting OTLP using gRPC.
+    openTelemetrySdk = OpenTelemetrySdk.builder()
+        .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
+        .setTracerProvider(sdkTracerProvider).build();
+
+    // Enable OpenTelemetry traces before Injecting OpenTelemetry
     SpannerOptions.enableOpenTelemetryTraces();
 
-    // Configure the OpenTelemetry pipeline with CloudTrace exporter
-    openTelemetrySdk = setupTraceExporter();
-
-    // Create a Spanner client
-    SpannerOptions options = SpannerOptions.newBuilder()
-        .setProjectId(PROJECT_ID)
-        .setHost(CLOUD_SPANNER_ENDPOINT)
-        .setOpenTelemetry(openTelemetrySdk)
-        .setEnableServerSideTracing(true)
-        .build();
-    Spanner spanner = options.getService();
-
+    SpannerOptions spannerOptions =
+        SpannerOptions.newBuilder().setProjectId(PROJECT_ID)
+            .setOpenTelemetry(openTelemetrySdk)
+            .setEnableEndToEndTracing(true)
+            // .setSessionPoolOption(sessionPoolOptions)
+            .build();
+    Spanner spanner = spannerOptions.getService();
+  
     // Creates a database client
     DatabaseClient dbClient =
         spanner.getDatabaseClient(DatabaseId.of(PROJECT_ID, INSTANCE_ID, DATABASE_ID));
+    
+    for (int i = 0; i < 10; i++) {
+      // Create a player.
+      Player player = new Player("Naresh", "Chaudhary", "f1578551-eb4b-4ecd-aee2-9f97c37e164e", String.format("nareshz-%d@google.com", System.currentTimeMillis()));
+      createPlayer(dbClient, player);
 
-    // Create a player.
-    Player player = new Player("Naresh", "Chaudhary", "f1578551-eb4b-4ecd-aee2-9f97c37e164e", String.format("nareshz-%d@google.com", System.currentTimeMillis()));
-    createPlayer(dbClient, player);
-
-    // Read the created player.
-    Player readPlayer = readPlayer(dbClient, player.email);
-    System.out.println(String.format("%s %s %s %s", readPlayer.firstName, readPlayer.lastName, readPlayer.email, readPlayer.uuid));
-
+      // Read the created player.
+      Player readPlayer = readPlayer(dbClient, player.email);
+      System.out.println(String.format("%s %s %s %s", readPlayer.firstName, readPlayer.lastName, readPlayer.email, readPlayer.uuid));
+    }
+    
     // Closes the client which will free up the resources used
     spanner.close();
 
